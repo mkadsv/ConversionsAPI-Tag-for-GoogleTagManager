@@ -114,6 +114,10 @@ const Math = require('Math');
 const getTimestampMillis = require('getTimestampMillis');
 const sha256Sync = require('sha256Sync');
 const getCookieValues = require('getCookieValues');
+const getType = require('getType');
+const logToConsole = require('logToConsole');
+const makeInteger = require('makeInteger');
+
 
 // Constants
 const API_ENDPOINT = 'https://graph.facebook.com';
@@ -130,6 +134,28 @@ const GTM_EVENT_MAPPINGS = {
   "generate_lead": "Lead",
   "view_item": "ViewContent",
   "sign_up": "CompleteRegistration"
+};
+const DPO_ERROR_MESSAGES = [
+  "ERROR: Data proteccessing options parameter is undefined but must be required.",
+  "ERROR: Data proteccessing options parameter is incorrect data type.",
+  "ERROR: Data proteccessing options parameter has a value that is not acceptable."
+];
+const DATA_PROCESSING_OBJECT_MAPPING = {
+  "dpo": {
+    "paramater": "x-fb-cd-dpo",
+    "expectedDataTypes": ["string","array"],
+    "expectedDataValues": ["LDU", []],
+  },
+  "dpoc": {
+    "paramater": "x-fb-cd-dpoc",
+    "expectedDataTypes": ["integer","string"],
+    "expectedDataValues": [0, 1]
+  },
+  "dpos": {
+    "paramater": "x-fb-cd-dpos",
+    "expectedDataTypes": ["integer","string"],
+    "expectedDataValues": [0, 1000]
+  }
 };
 
 function isAlreadyHashed(input){
@@ -162,6 +188,81 @@ function getFacebookEventName(gtmEventName) {
   return GTM_EVENT_MAPPINGS[gtmEventName] || gtmEventName;
 }
 
+function checkType(param, expectedType, expectedValues, isOptional) {
+  logToConsole("inside checkType()", param);
+  let typeResponse = {};
+  let paramType = getType(param);
+   if (checkNullOrUndefined(paramType) && isOptional){
+    return {isValid: true, nextParamReq: false, logMessage: 'undefined but ok'};
+  } else if(!checkNullOrUndefined(paramType) && paramType === expectedType){
+    return {isValid: true, nextParamReq: true, logMessage: 'correct data type'};
+  } else if (checkNullOrUndefined(paramType) && !isOptional) {
+    return {isValid: false, logMessage: DPO_ERROR_MESSAGES[0]};
+  } else if (!checkNullOrUndefined(paramType) && !isOptional && paramType !== expectedType) {
+    if (getType(expectedValues[0]) !== "integer") {
+      return {isValid: false, nextParamReq: false, logMessage: DPO_ERROR_MESSAGES[1]};
+    }
+    return expectedValues(makeInteger(param), expectedValues) ? {isValid: true, nextParamReq: false, logMessage: 'ok'} : {isValid: false, nextParamReq: false, logMessage: DPO_ERROR_MESSAGES[2]};
+  } 
+}
+
+function checkDataType(curDataType, expDataTypeArr) {
+  logToConsole("inside checkDataType()", curDataType);
+  if (curDataType === expDataTypeArr[0] || curDataType === expDataTypeArr[1]) {
+    return true;
+  }
+  return false;
+}
+
+function checkExpectedValues(curValue, expectedValuesArr) {
+  logToConsole("inside checkExpectedValues()", curValue);
+  if (curValue === expectedValuesArr[0] || curValue === expectedValuesArr[1]){
+    return true;
+  }
+  return false;
+}
+
+function checkNullOrUndefined(curDataType) {
+  logToConsole("inside checkNullOrUndefined()", curDataType);
+  if (curDataType === 'null' || curDataType === 'undefined'){
+    return true;
+  }
+  return false;
+}
+
+function logErrorAndFail(logMsg){
+  logToConsole(logMsg);
+  data.gtmOnFailure();
+}
+
+function dataProtection(dpo, dpoc, dpos, dpArr) {
+  logToConsole("inside dataProtection", dpo, dpoc, dpos);
+  logToConsole("inside dataProtection", eventModel[dpo.paramater]);
+  let curDpObj = checkType(eventModel[dpo.paramater], dpo.expectedDataTypes, dpo.expectedDataValues, true);
+  logToConsole("inside dataProtection - passed checkType#1");
+  if (curDpObj.isValid) {
+    if (!curDpObj.nextParamReq) {
+      logToConsole("first if DataProtection", dpArr);
+      return dpArr;
+    } else {
+      curDpObj = checkType(eventModel[dpoc.paramater], dpoc.expectedDataTypes, dpoc.expectedDataValues, false);
+      if(curDpObj.isValid) {
+        dpArr.push(eventModel[dpoc.paramater]);
+         curDpObj = checkType(eventModel[dpos.paramater], dpos.expectedDataTypes, dpos.expectedDataValues, false);
+        if (curDpObj.isValid) {
+          dpArr.push(eventModel[dpos.paramater]);
+          return dpArr;
+        } else {
+          logErrorAndFail(curDpObj.logMessage);
+        }
+      } else {
+        logErrorAndFail(curDpObj.logMessage);
+      }
+    }
+  } else {
+    logErrorAndFail(curDpObj.logMessage);
+  }
+}
 
 
 const eventModel = getAllEventData();
@@ -217,6 +318,17 @@ event.custom_data.num_items = eventModel['x-fb-cd-num_items'];
 event.custom_data.predicted_ltv = eventModel['x-fb-cd-predicted_ltv'];
 event.custom_data.status = eventModel['x-fb-cd-status'];
 event.custom_data.delivery_category = eventModel['x-fb-cd-delivery_category'];
+
+// Data Processing Options for Users in California <https://developers.facebook.com/docs/marketing-apis/data-processing-options/>
+const dataProcessingParams = dataProtection(DATA_PROCESSING_OBJECT_MAPPING.dpo, DATA_PROCESSING_OBJECT_MAPPING.dpoc, DATA_PROCESSING_OBJECT_MAPPING.dpos, []);
+logToConsole("dataProcessingParams result: ", dataProcessingParams);
+if (dataProcessingParams.length === 0) {
+  event.data_processing_options = [];
+} else {
+  event.data_processing_options = dataProcessingParams[0];
+  event.data_processing_options_country = dataProcessingParams[1];
+  event.data_processing_options_state = dataProcessingParams[2];
+}
 
 const eventRequest = {data: [event], partner_agent: PARTNER_AGENT};
 
@@ -640,7 +752,10 @@ setup: |-
       predicted_ltv: '10000',
       delivery_category: 'home_delivery',
       status: 'subscribed',
-    }
+    },
+    'data_processing_options': [LDU'],
+    'data_processing_options_country': 0,
+    'data_processing_options_state': 0
   };
 
   let inputEventModel = {
@@ -675,6 +790,9 @@ setup: |-
     'x-fb-cd-num_items': testData.custom_data.num_items,
     'x-fb-cd-predicted_ltv': testData.custom_data.predicted_ltv,
     'x-fb-cd-delivery_category': testData.custom_data.delivery_category,
+    'x-fb-cd-dpo': testData.data_processing_options,
+    'x-fb-cd-dpoc': testData.data_processing_options_country,
+    'x-fb-cd-dpos': testData.data_processing_options_state,
   };
 
   const expectedEventData = {
@@ -712,7 +830,10 @@ setup: |-
       'predicted_ltv': testData.custom_data.predicted_ltv,
       'status': testData.custom_data.status,
       'delivery_category': testData.custom_data.delivery_category,
-    }
+    },
+    'data_processing_options': ['LDU'],
+    'data_processing_options_country': 0,
+    'data_processing_options_state': 0
   };
 
   mock('getAllEventData', () => {
